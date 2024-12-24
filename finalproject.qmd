@@ -1,0 +1,648 @@
+---
+title: "Analyzing Urban Green Space Accessibility and Demographics in Baltimore"
+format: html
+editor: visual
+bibliography: References_fp.bib
+output: pptx
+---
+
+# Introduction
+
+This project analyzes Baltimore's park accessibility and its relationship with demographics, including population density, race, and income. Parks are vital resources for physical, mental, and social well-being, yet access to these spaces can vary significantly across communities. For individuals with disabilities, access to these spaces can profoundly affect their quality of life. Accessibility ensures that everyone has the chance to experience the mental and physical health benefits of outdoor activities.[@accessib]\
+\
+Through walkability isochrone analysis and demographic correlations can identify access gaps and inform strategies for more equitable urban green spaces.
+
+# Goals
+
+-   Assess accessibility to parks and green spaces in Baltimore City, focusing on their proximity within tracts.
+-   Analyze the ratio of park area to tract area, identify tracts without parks, and measure the distance from tract centroids to the nearest parks to highlight disparities in access.
+-   Perform isochrone analysis to evaluate park accessibility using various travel modes (walking, cycling, driving).
+-   Examine equity in park accessibility by analyzing the relationship between demographic factors and green space distribution.
+-   Learn and apply advanced mapping functions, enhancing skills in interactive tools like Leaflet and Mapview.
+-   Improve proficiency in working with open-source spatial data and writing functions to enhance analytical outputs and visualizations.
+
+# Data Sources to Support the Project Goals
+
+-   Open-Source Data from TIGER/Line (Tigris): To obtain tract-level geographic and demographic data.
+-   JSON Files from Open Baltimore: To access local datasets, including information about parks and tracts.
+-   Tidy Census: To integrate U.S. Census data, providing demographic and socioeconomic details for spatial analysis (requires API key).
+-   OpenRouteService: To perform isochrone analysis and evaluate accessibility using various travel modes (requires API key).
+-   Leaflet and MapView Plugins: To visualize and interact with spatial data effectively
+
+# Project Approach
+
+-   Data Collection:
+
+    -   Use TIGER/Line (Tigris) for tract-level data, Open Baltimore JSON files for parks and tracts, Tidy Census for demographics, and OpenRouteService for isochrone mapping.
+
+-   Spatial Analysis:
+
+    -   Measure park proximity, perform isochrone analysis to evaluate coverage for selected parks and locations using various travel modes, and calculate park-to-tract area ratios to identify disparities.
+
+-   Visualization:
+
+    -   Use Leaflet, MapView, ggplot, bar graphs, and boxplots to display accessibility and spatial relationships.
+
+-   Equity Assessment:
+
+    -   Visually correlate park access with demographic factors to identify underserved areas.
+
+-   Insights and Explanation:
+
+    -   Analyze and interpret the existing situation of parks and provide explanations based on the findings to support conclusions.
+
+Limitations: MAUP: tracts are considered for analysis, so the emphasis is given to the census tracts. May not fully capture the socio-political processes influencing current disparities in green space access. Primarily addresses proximity and walkability, omitting factors like affordability, programming, or cultural inclusivity.
+
+Information: code is referred from R documentation using ? used sf functions in the major operations. provided citations and other LLM references at code chunks
+
+```{r loadinglibraries, echo = TRUE, include = FALSE}
+#| echo: true
+# Load necessary libraries
+library(tigris)
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(tidycensus)
+library(mapview)
+#install.packages("remotes")
+#install.packages("leaflet")
+library(leaflet)
+#install.packages("maptiles")
+library(maptiles)
+source("functions.R")
+
+```
+
+### Boundary and Park Data:
+
+The Baltimore boundary was extracted using the Tigris package, and park data was obtained from the Open Baltimore download link[@parkdat]. Transformations were performed to ensure alignment with the other objects.
+
+```{r tract_park, echo = TRUE, include = FALSE}
+
+# Get Baltimore boundary using tigris
+balt_boundary_sf <- places(state = "MD", cb = TRUE) |>
+  filter(NAME == "Baltimore") |>
+  st_transform(crs = 3857)
+balt_boundary_sf
+#plot(balt_boundary_sf$geometry, col = "lightgrey", main = "Baltimore City Boundary")
+
+
+
+# Obtain parks data from Open Baltimore (GeoJSON format)
+ob_park <- st_read("https://hub.arcgis.com/api/v3/datasets/dc7cb65e6cb640b7893d5ca59c841dff_1/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1") |> st_transform(crs = 3857)
+
+
+```
+
+The ob_parks dataset includes the following park categories some observations are Mini Parks and Neighborhood Parks lead with the highest counts. Other park types, such as Green Spaces and Citywide Parks, have moderate representation. Special Use Facilities and Civic Spaces are the least common. Parks from Alternate Providers generally have lower counts across all classes. Alternate Providers include private organizations, community groups, or non-profits offering access to parks or green spaces.
+
+```{r parkclassgraph}
+parktype_summary <- table(ob_park$parkClass)
+
+ggplot(
+  data = ob_park,
+  mapping = aes(y = parkClass)
+) +
+  labs(
+    caption = "Bar graph 1"
+  ) +
+  geom_bar()
+
+```
+
+### Retrieving Census demographic data
+
+```{r retrievingcensusdata, echo = TRUE, include = FALSE}
+
+# Define your census API key
+#census_api_key("01e6ac41accecf65eb9b8303b705c52e9af670bb", install = TRUE, overwrite = TRUE)
+
+# Load variables for ACS 2022
+vars_2022 <- load_variables(year = 2022, dataset = "acs5", cache = TRUE)
+
+# Retrieve demographic data for Baltimore City from the 2022 ACS dataset
+balt_pop_22 <- get_acs(
+  geography = "tract",
+  variables = c(
+    total_population = "B01003_001",   # Total population
+    median_age = "B01002_001",          # Median age
+    median_income = "B19013_001",       # Median income
+    White_pop = "B02001_002",           # White population
+    Black_pop = "B02001_003"            # Black population
+  ),
+  state = "MD",
+  county = "Baltimore city",
+  geometry = TRUE,
+  year = 2022
+)
+
+
+#View(ob_park)
+#View(balt_pop_22)
+```
+
+### Process and Transform Data (Filter by Population and Race)
+
+```{r tractprocessing}
+
+# Filter population and race data for analysis
+balt_trct_pop22 <- balt_pop_22 |>
+  filter(variable == "total_population") |>  st_transform(crs = 3857)
+#View(balt_trct_pop22)
+
+balt_black_pop22 <- balt_pop_22 |>
+  filter(variable == "Black_pop") |> st_transform(crs = 3857)
+
+balt_white_pop22 <- balt_pop_22 |>
+  filter(variable == "White_pop") |> st_transform(crs = 3857)
+
+# Calculate the percentage of Black and White populations
+
+balt_black_percent <- balt_black_pop22 |> 
+  mutate(percent_black = (estimate / balt_trct_pop22$estimate) * 100)
+
+balt_white_percent <- balt_white_pop22 |>
+  mutate(percent_white = (estimate/balt_trct_pop22$estimate)*100)
+
+# View(balt_trct_pop22)
+
+```
+
+Used scale_fill_manual to create legends in the plot. [@createy]
+
+```{r tract}
+# Map of parks in Baltimore along with the tracts
+ggplot() +
+  geom_sf(data = balt_trct_pop22, fill = NA , color = "black") +
+  geom_sf(data = ob_park, aes(fill = "Parks"), color = "black", size = 0.3) + 
+  scale_fill_manual(
+    name = "Legend",
+    values = c("Parks" = "green")
+  ) +
+  labs(title = "Parks in Baltimore", caption = "Figure 1") +
+  theme_minimal()
+```
+
+Inspired by the [@noauthor_urban_nodate; ] Urban Spatial project on equitable park access, this analysis explores park accessibility in Baltimore by examining how close census tracts are to the nearest park. To simplify the calculations, parks are represented as points rather than polygons, focusing on proximity rather than park size or shape. The geographic center of each census tract, or centroid, is used as a stand-in for where people live within the tract. By measuring the distance between these centroids and park points, tracts are classified as either "Near Park" or "Far from Park" based on a threshold of 800 meters. This approach helps uncover disparities in park access and supports thoughtful, equity-driven urban planning.
+
+## Calculating of distance to Parks
+
+```{r centroid, echo = TRUE, include = FALSE}
+parks_pts <- ob_park |> st_cast("POINT")
+
+# Calculate centroid of each census tract
+trct_centroid22 <- st_centroid(balt_trct_pop22) 
+
+# Find distance from tract centroids to parks
+distance_trct_2_park22 <- st_distance(trct_centroid22, parks_pts)
+
+#View(distance_trct_2_park22)
+
+# Find the minimum distance to nearest park
+distance_trct_2_park22_min <- apply(distance_trct_2_park22, 1, min)
+
+
+# Classify based on distance to nearest park
+balt_trct_pop22$distance_type <- ifelse(as.numeric(distance_trct_2_park22_min) < 800, "Near Park", "Far from park")
+
+```
+
+The summary shows the count of the tracts where the park is far or near to the centroid of the tract.
+
+```{r}
+# Summary of classification
+summary22 <- table(balt_trct_pop22$distance_type)
+summary22
+```
+
+```{r ggplotdistancetoparks}
+# Plot census tracts classified by distance to parks
+ggplot(data = balt_trct_pop22) +
+  geom_sf(aes(fill = distance_type), color = "black", size = 0.1) + 
+  scale_fill_manual(
+    values = c("Near Park" = "green", "Far from park" = "blue"),
+    name = "Park Access"
+  ) +
+  labs(
+    title = "Census tracts classified by proximity to parks, 2022",
+    caption = "Figure 2"
+  ) +
+  theme_void()
+
+```
+
+## Calculate Population Density and Area
+
+```{r densityandarea}
+# Calculate area of census tracts (in sq kilometers)
+balt_trct_pop22$area_sq_km <- as.numeric(st_area(balt_trct_pop22) / 10^6)
+
+# Calculate population density (people per sq kilometer)
+balt_trct_pop22$pop_density <- balt_trct_pop22$estimate / balt_trct_pop22$area_sq_km
+
+# View(balt_trct_pop22)
+
+```
+
+## Analyze Population Density by Distance to Parks
+
+```{r density comaprison, echo = TRUE, include = FALSE}
+
+density_comparison <- balt_trct_pop22 |>
+  group_by(distance_type) |>
+  summarize(mean_density = mean(pop_density, na.rm = TRUE))
+
+```
+
+```{r ggplotpopdensity}
+ggplot(balt_trct_pop22) +
+  geom_boxplot(aes(x = distance_type, y = pop_density, fill = distance_type)) +
+  scale_fill_manual(values = c("blue", "green")) +
+  labs(
+    title = "Population Density by Park Access",
+    x = "Park Access",
+    y = "Population Density (people per square km)",
+    caption = "Plot 1"
+  ) +
+  theme_minimal()
+```
+
+Population Density:
+
+On average, census tracts near parks have a higher population density (2599.649 people/km²). Tracts far from parks have a lower average population density (1694.107 people/km²).
+
+This result could indicate that parks are more accessible in denser, urbanized areas, while less dense areas may have fewer nearby parks.
+
+## Analyze Race Demographics by Distance to Parks
+
+As per, [@buckley2009]A higher proportion of African Americans have access to parks within walking distance, defined as 400 meters or less, than whites, but whites have access to more acreage of parks within walking distance than blacks.
+
+```{r demographicpercentage, echo = TRUE, include = FALSE}
+# Add racial demographic percentages (Black and White)
+balt_trct_pop22 <- balt_trct_pop22 |>
+  mutate(
+    percent_white = balt_white_pop22$estimate / balt_trct_pop22$estimate * 100,
+    percent_black = balt_black_pop22$estimate / balt_trct_pop22$estimate * 100
+  )
+
+# Race comparison by park access
+race_comparison <- balt_trct_pop22 |>
+  group_by(distance_type) |>
+  summarize(
+    mean_white_percentage = mean(percent_white, na.rm = TRUE) ,
+    mean_black_percentage = mean(percent_black, na.rm = TRUE))
+```
+
+```{r demographicpercentage1}
+# Plot racial demographics comparison by park access
+ggplot(balt_trct_pop22) +
+  geom_boxplot(aes(x = distance_type, y = percent_black, fill = distance_type)) +
+  scale_fill_manual(values = c("blue", "green")) +
+  labs(
+    title = "Black Population Percentage by Park Access",
+    x = "Park Access",
+    y = "Black Population Percentage",
+    caption = "Plot 2"
+  ) +
+  theme_minimal()
+
+ggplot(balt_trct_pop22) +
+  geom_boxplot(aes(x = distance_type, y = percent_white, fill = distance_type)) +
+  scale_fill_manual(values = c("blue", "green")) +
+  labs(
+    title = "White Population Percentage by Park Access",
+    x = "Park Access",
+    y = "White Population Percentage",
+    caption = "Plot 3"
+  ) +
+  theme_minimal()
+
+```
+
+-   Based on the preliminary analysis, tracts closer to parks show a higher percentage of Black residents and a lower percentage of White residents compared to tracts farther from parks.
+
+-   This suggests that Black residents in Baltimore may have better proximity to parks compared to White residents.
+
+-   While I have not done in depth survey, the initial results appear to align with findings from existing research, which suggests disparities in park access and park acreage across different racial groups in Baltimore.
+
+Studies have shown that low-income neighborhoods, often with higher minority populations, may have less access to quality parks [@spatial]Spatial Disparities in the Distribution of Parks and Green Spaces in the USA \| So the income analysis could provide insights about it.
+
+### Median Income by Park Proximity
+
+```{r mediaincome, echo = TRUE, include = FALSE}
+balt_trct_medianincome22 <- balt_pop_22 |>
+  filter(variable == "median_income") |>
+  st_transform(crs = 3857)
+
+
+balt_trct_pop22_df <- balt_trct_pop22 |>
+  st_drop_geometry()
+
+btrct_joined <- balt_trct_medianincome22 |>
+  left_join(balt_trct_pop22_df, by = "GEOID")
+
+balt_trct_median_income <- btrct_joined |>
+  filter(variable.x == "median_income")  
+
+
+med_income_values <- balt_trct_median_income |>
+  group_by(distance_type) |>
+  summarize(
+    median_income = median(estimate.x, na.rm = TRUE)  
+  )
+```
+
+```{r mediaincomemap}
+ggplot(btrct_joined |>
+         filter(variable.x == "median_income"), aes(x = distance_type, y = estimate.x)) +
+  geom_boxplot(aes(fill = distance_type)) + 
+  scale_fill_manual(values = c("blue", "green")) + 
+  labs(
+    title = "Boxplot of Median Income by Park Access",
+    x = "Park Access",
+    y = "Median Income",
+    caption = "Plot 4"
+  ) +
+  theme_minimal()
+
+```
+
+The median household income is slightly higher in areas farther from parks compared to those nearer.
+
+The boxplot visualization indicates that the distribution of median incomes is relatively similar regardless of proximity to parks, with no significant outliers or variations.
+
+These findings suggest that, in Baltimore, proximity to parks does not significantly correlate with median household income. This could indicate equitable physical access to parks across different income levels. The code to only filter the tracts without parks is drawn from AI [@chatgpt]
+
+### Find the tracts with no parks
+
+```{r trctparkintersection, echo = TRUE, include = FALSE}
+# Determine intersections between tracts and parks
+intersections_p_t <- st_intersects(balt_trct_pop22, ob_park)
+
+# Filter tracts with no intersections (no parks)
+tracts_without_parks <- balt_trct_pop22[lengths(intersections_p_t) == 0, ]
+```
+
+```{r trctparkintersection1}
+ggplot() +
+  geom_sf(data = tracts_without_parks, aes(fill = "Tracts with no Parks"), color = "black") +
+  geom_sf(data = balt_trct_pop22, fill = NA, color = "black") +
+  geom_sf(data = ob_park, aes(fill = "Parks"), color = "darkgreen") +
+  scale_fill_manual(
+    name = "Legend",
+    values = c("Tracts with no Parks" = "red", "Parks" = "green")) +
+  labs(
+    title = "Baltimore tracts with no parks",
+    caption = "figure 3"
+  ) +
+  theme_minimal()
+```
+
+```{r mapview2}
+# Mapview of tracts without parks
+ mapview(tracts_without_parks, col.regions = "red") + mapview(ob_park, col.regions = "green") + mapview(balt_trct_pop22, alpha.regions = 0 )
+
+```
+
+An analysis of Baltimore's census tracts reveals that 35 out of 199 tracts lack parks, indicating that approximately 17.6% of the city's neighborhoods may have limited access to green spaces. This finding underscores the need for targeted urban planning to enhance park accessibility and promote equitable distribution of recreational areas across all communities.
+
+### Park and tract comparison
+
+```{r parktractcomparison}
+parks_tract_intersect <- st_intersection(balt_trct_pop22, ob_park)
+#View(parks_tract_intersect)
+tract_park_size <- parks_tract_intersect |> 
+  group_by(GEOID) |>
+  summarise(total_parkarea = sum(prkAcreage, na.rm = TRUE))
+
+# As two sf objects cannot be joined, I want to join using a column, dataframe is used
+balt_trct_pop22_df <- balt_trct_pop22_df |>
+  left_join(tract_park_size, by = "GEOID")
+balt_trct_pop22_sf <- st_as_sf(balt_trct_pop22_df)
+
+summary(tract_park_size$total_parkarea)
+
+
+```
+
+Baltimore's census tracts show an uneven distribution of park areas, with a few neighborhoods containing large green spaces while most have minimal parkland. This pattern creates disparities in recreational access across different parts of the city.
+
+## Isochrone Analysis
+
+The main goal is to analyze the accessibility of parks in Baltimore for various travel modes (walking, cycling, driving) within specific time intervals (5, 10, and 15 minutes). This can be achieved with isochrones.
+
+Isochrones are calculated using [@openrout2018]OpenRouteService for two specific parks and one custom location.
+
+It Combines leaflet interactive maps for qualitative insights and ggplot2 for high-quality static visualizations.
+
+##### Using this tool Park Isochrones are retrieved from these two park locations (Park-75 and Park-127):
+
+Calculating 5- and 10-minute isochrones for these parks allowed evaluation of their coverage areas.
+
+##### Travel Modes for a Selected Location:
+
+Walking, cycling, and driving isochrones were compared to understand park accessibility from a user-defined location. By integrating park data, tract data,and multiple travel modes, It provides actionable insights.
+
+```{r mapview}
+
+mapview::mapview(balt_pop_22, alpha.regions = 0) + mapview(ob_park)
+```
+
+This code is used to visually inspect and identify the desired park from the dataset (ob_park) by overlaying it with population data (balt_pop_22) on an interactive map. It helps determine the specific park location for creating isochrones by ensuring both park boundaries and population distribution are clearly visible.
+
+As Open route services creates isochrones around the particular point, so a particular park location using park id need to be selected so that to find the walking time around it. The following code is adapted from[@milos-ag] Milo's project on isochrones, where isochrones are generated around a specific point for different travel modes. In my case, I simplified the process using custom functions to focus on a specific park location identified by its GEOID. I applied this method to analyze walking times at intervals around the selected park and explore various travel modes for the selected location. This adaptation provided a valuable learning experience, allowing me to practice working with functions and delve into the use of interactive tools like Leaflet.
+
+```{r install_sochrone_packages, echo = TRUE, include = FALSE}
+
+remotes::install_github(
+    "GIScience/openrouteservice-r"
+)
+
+```
+
+```{r apikey_source, echo = TRUE, include = FALSE}
+#openrouteservice::ors_profile()
+api_key <- "5b3ce3597851110001cf6248cc027c69d549466181f98356e887d6cb"
+```
+
+For this package to work, all spatial data must be in the WGS 84 coordinate system (CRS 4326), which is required for OpenRouteService to calculate isochrones. Therefore, the parks and tracts are transformed accordingly.
+
+For this package to run the datum should be in WGS so transforming the parks and tracts
+
+```{r transform_crs, echo = TRUE, include = FALSE}
+park_centroid <- st_centroid(ob_park)
+ob_park_wgs <- st_transform(ob_park, crs = 4326)
+park_centroid_wgs <- st_transform(park_centroid, crs = 4326)
+
+balt_trct_pop22_wgs <- st_transform(balt_trct_pop22, crs = 4326)
+```
+
+Isolate and focus on Park-75 and tract75 spatial boundary to easily zoom into the park location and its isochrones, avoiding the need for manual searching.
+
+Walk-ability analysis for Park-75
+
+```{r park75_setup, echo = TRUE, include = FALSE}
+
+#view(park_centroid_wgs)
+park75_balt <- get_coords(75, park_centroid_wgs)
+
+focused_park75 <- ob_park_wgs[ob_park_wgs$OBJECTID == 75, ]
+
+focused_park75 <- st_transform(focused_park75, crs = 4326)
+
+```
+
+using the function ors_isochrones function, ischrones are retrived and then Convert isochrone walking times to minutes and simplify the polygons by grouping and intersecting overlapping areas. crop overlapping polygons to make them distinct and easier to visualize interactively in Leaflet maps.
+
+```{r park75_isochrones, echo = TRUE, include = FALSE}
+park75_footwalking_ams <- openrouteservice::ors_isochrones(
+  locations = park75_balt,
+  profile = "foot-walking",
+  range = c(300, 600),  # 5 and 10 minutes
+  interval = 300,       # Interval size
+  api_key = api_key,
+  output = "sf"
+)
+
+# Convert walking times to minutes and factorize, as it helps in visualization
+park75_footwalking_ams$mins <- park75_footwalking_ams$value / 60
+park75_footwalking_ams$mins <- factor(park75_footwalking_ams$mins)
+
+# Crop and simplify isochrones to show difference in time
+park75_footwalking_ams_cropped <- park75_footwalking_ams |>
+  group_by(mins) |>
+  st_intersection() |>
+  ungroup()
+
+```
+
+```{r filter_tracts}
+# Filter tracts that intersect with isochrones
+focused_tract75 <- balt_trct_pop22_wgs[st_intersects(balt_trct_pop22_wgs, park75_footwalking_ams_cropped, sparse = FALSE), ]
+
+```
+
+Create an interactive map showing the isochrones, tracts, and Park-75 for better visualization of park accessibility. create_leafletmap function works if required attributes are provided
+
+```{r map_park75}
+create_leafletmap(park75_footwalking_ams_cropped, focused_tract75, focused_park75)
+```
+
+leaflet_map_park \<- create_leafletmap(park75_footwalking_ams_cropped, focused_tract75, focused_park75) Repeated the same method for a different park
+
+Isochrones for parkid 127
+
+```{r park127_setup}
+
+park127_balt <- get_coords(127, park_centroid_wgs)
+
+park127_footwalking_ams <- openrouteservice::ors_isochrones(
+  locations = park127_balt,
+  profile = "foot-walking",
+  range = c(300, 600),
+  interval = 300,
+  api_key = api_key,
+  output = "sf"
+)
+
+```
+
+Data Processing- Adding a new column, factor and cropping for dividing the isochrone polygons, it improves the visualization.
+
+```{r process_park127, echo = TRUE, include = FALSE}
+park127_footwalking_ams$mins <- park127_footwalking_ams$value / 60
+park127_footwalking_ams$mins <- factor(park127_footwalking_ams$mins)
+
+park127_footwalking_ams_cropped <- park127_footwalking_ams |>
+  group_by(mins) |>
+  st_intersection() |>
+  ungroup()
+
+
+focused_tract127 <- balt_trct_pop22_wgs[st_intersects(balt_trct_pop22_wgs, park127_footwalking_ams_cropped, sparse = FALSE), ]
+
+focused_park127 <- ob_park_wgs[ob_park_wgs$OBJECTID == 127, ]
+```
+
+```{r map_park127}
+create_leafletmap(park127_footwalking_ams_cropped, focused_tract127, focused_park127)
+```
+
+```{r static_map}
+ggplot() +
+  geom_sf(data = focused_tract75, fill = NA, color = "black", size = 4) +
+  geom_sf(data = park75_footwalking_ams, aes(fill = value/60), alpha = .5, color = "black") +
+  geom_sf(data = focused_park75, fill = "green", color = "black", alpha = 0.4) +
+   scale_fill_fermenter(
+    name = "Walking Time (Minutes)", 
+    palette = "RdYlBu",  
+    direction = 1,
+  ) +
+  
+  labs(title = "Isochrone, Park, and Tract",
+       subtitle = "5-10 Minute Walking Distance",
+       caption = "figure 4") +
+    theme_minimal() 
+
+```
+
+This package generates time-based isochrones around a point. By applying it to selected locations, I aim to visualize the nearest parks within 5, 10, and 15-minute intervals across different travel modes. here it is intervals are calculated in seconds \[300(60\*5), 900(60\*15)\]
+
+```{r define_location, echo = TRUE, include = FALSE}
+coords_isochrone <- data.frame(lon = -76.601798751124, lat = 39.29971352538098)
+
+coords_isochrone <- as.numeric(coords_isochrone)
+
+```
+
+```{r generate_isochrones, echo = TRUE, include = FALSE}
+footwalking_SL <- extract_isochrones(coords_isochrone, mode = "foot-walking", range = 900, interval = 300, api_key = api_key)
+
+cycling_SL <- extract_isochrones(coords_isochrone, mode = "cycling-regular", range = 900, interval = 300, api_key = api_key)
+
+drivingcar_SL <- extract_isochrones(coords_isochrone, mode = "driving-car", range = 900, interval = 300, api_key = api_key)
+```
+
+```{r process_modes, echo = TRUE, include = FALSE}
+footwalking_SL <- footwalking_SL |> mutate(mins = factor(value/60))
+footwalking_SL_crop <- unoverlap_isochrones(footwalking_SL, "mins")
+
+cycling_SL <- cycling_SL |> mutate(mins = factor(value/60))
+cycling_SL_crop <- unoverlap_isochrones(cycling_SL, "mins")
+
+drivingcar_SL <- drivingcar_SL |> mutate(mins = factor(value/60))
+drivingcar_SL_crop <- unoverlap_isochrones(drivingcar_SL, "mins")
+
+```
+
+```{r map_walk}
+create_BP_leafletmap(footwalking_SL_crop, balt_trct_pop22_wgs, ob_park_wgs,coords = coords_isochrone, title = "selected location foot walking" )
+```
+
+```{r map_cycle}
+create_BP_leafletmap(cycling_SL_crop, balt_trct_pop22_wgs, ob_park_wgs, coords = coords_isochrone, title = "Selected location Cycling")
+```
+
+```{r map_drive}
+create_BP_leafletmap(drivingcar_SL_crop, balt_trct_pop22_wgs, ob_park_wgs, coords = coords_isochrone, title = "Selected location Driving Car" )
+```
+
+## Conclusion
+
+This project highlights a notable disparity in park distribution across Baltimore. While the central part of the city has a higher density of parks that are accessible to nearby tracts, these parks are often small in size. In contrast, the northern and southern parts of the city have fewer parks relative to tract size, and some tracts lack parks entirely. Although certain areas are near parks, the limited size of these green spaces restricts their usability. Interestingly, Black communities tend to have better access to parks compared to other groups, and socioeconomic factors show minimal impact on overall park accessibility. These findings suggest that historical and planning decisions may have shaped the distribution of green spaces, underscoring the need for equitable urban planning to address these disparities.
+
+This situation may be influenced by historical or urban planning factors that shaped the city's green space distribution. Isochrones proved to be an effective tool for analyzing accessibility to specific locations. By generating isochrones for parks and selected points, this method can identify nearby parks within 5- to 15-minute intervals for various travel modes, such as walking, cycling, or driving. This approach offers versatility, as it can be applied to any desired location to evaluate green space accessibility comprehensively.
+
+### Who Might Benefit from My Project?
+
+This project benefits a wide range of stakeholders in Baltimore. City planners and policymakers can use the findings to address disparities in park accessibility by targeting tracts with limited or no green spaces for development. Community advocacy groups focused on environmental justice may leverage the data to advocate for equitable resource allocation in underserved areas. Additionally, public health professionals can highlight the importance of walkable access to parks for improving physical and mental health, especially in neighborhoods with higher population densities or minority demographics.
+
+### Can Your Project Avoid Causing Any Harm to the Community?
+
+The project takes a thoughtful approach to addressing park access in Baltimore, acknowledging that environmental improvements can reshape neighborhood dynamics in complex ways. By letting data tell the story of existing disparities and actively involving local residents in the conversation, the research aims to support meaningful improvements in access. The focus is on thoughtful development that lets more residents enjoy the benefits of parks - from family gatherings to exercise to quiet reflection
+
+### Suggesting a Policy Change
+
+1.  Target park development in underserved areas, particularly in tracts with high Black populations and limited green spaces. This focused approach addresses historical inequities while maximizing community impact.
+2.  Improve accessibility to existing parks by enhancing walkable infrastructure.
+3.  Plan proactively for future green spaces, especially in the northern and southern parts of Baltimore where development opportunities still exist. Learning from the current challenge of small, scattered parks in urban areas, these developing regions can prioritize setting aside larger spaces for parks early in their planning process. .
