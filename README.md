@@ -3,7 +3,6 @@ Analyzing Urban Green Space Accessibility and Demographics in Baltimore
 Krishna Chaitanya Mummadi
 2024-12-21
 
-# Analyzing Urban Green Space Accessibility and Demographics in Baltimore
 
 ## Overview
 
